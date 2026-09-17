@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+@theme {
+  --color-rail-saffron: #f97316;
+  --color-rail-saffron-hover: #ea580c;
+  
+  /* Status Colors */
+  --color-status-green: #22c55e;
+  --color-status-amber: #f59e0b;
+  --color-status-red: #ef4444;
+  --color-status-blue: #3b82f6;
+  --color-status-gray: #9ca3af;
+  
+  /* Department Colors */
+  --color-dept-eng: #475569; /* Slate */
+  --color-dept-sig: #0d9488; /* Teal */
+  --color-dept-trc: #8b5cf6; /* Violet */
+
+  /* Shell Colors */
+  --color-shell-bg: #fafaf9; /* warm off-white */
+  --color-shell-nav: #0f172a; /* deep navy */
+  --color-shell-card: #ffffff;
+  
+  --font-display: "Plus Jakarta Sans", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  /* Map to standard Tailwind utility namespaces */
+  --color-background: var(--color-shell-bg);
+  --color-foreground: #1c1917;
+  --color-card: var(--color-shell-card);
+  --color-card-foreground: #1c1917;
+  --color-popover: var(--color-shell-card);
+  --color-popover-foreground: #1c1917;
+  --color-primary: var(--color-rail-saffron);
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #e7e5e4;
+  --color-secondary-foreground: #1c1917;
+  --color-muted: #f5f5f4;
+  --color-muted-foreground: #78716c;
+  --color-accent: #f5f5f4;
+  --color-accent-foreground: #1c1917;
+  --color-destructive: var(--color-status-red);
+  --color-destructive-foreground: #ffffff;
+  --color-border: #e7e5e4;
+  --color-input: #e7e5e4;
+  --color-ring: var(--color-rail-saffron);
+  --radius: 0.5rem;
+}
+
+@layer base {
+  :root {
+    --background: var(--color-shell-bg);
+    --foreground: #1c1917;
+    
+    --card: var(--color-shell-card);
+    --card-foreground: #1c1917;
+    
+    --popover: var(--color-shell-card);
+    --popover-foreground: #1c1917;
+    
+    --primary: var(--color-rail-saffron);
+    --primary-foreground: #ffffff;
+    
+    --secondary: #e7e5e4;
+    --secondary-foreground: #1c1917;
+    
+    --muted: #f5f5f4;
+    --muted-foreground: #78716c;
+    
+    --accent: #f5f5f4;
+    --accent-foreground: #1c1917;
+    
+    --destructive: var(--color-status-red);
+    --destructive-foreground: #ffffff;
+    
+    --border: #e7e5e4;
+    --input: #e7e5e4;
+    --ring: var(--color-rail-saffron);
+    
+    --radius: 0.5rem;
+  }
+  
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+  }
+  code, pre {
+    font-family: var(--font-mono);
+  }
+}

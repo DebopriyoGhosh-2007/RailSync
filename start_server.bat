@@ -1,0 +1,17 @@
+@echo off
+title RailSync Server
+set RAILSYNC_ACTOR=Ananda Jana
+set RAILSYNC_ROLE=Section Controller
+echo ===================================================
+echo Starting RailSync Server on http://127.0.0.1:8000
+echo Press Ctrl+C in this window to stop the server.
+echo ===================================================
+cd /d "%~dp0"
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"
+if errorlevel 1 (
+	echo RailSync requires Python 3.11 or newer.
+	pause
+	exit /b 1
+)
+python -m uvicorn backend.main:app --reload
+pause
