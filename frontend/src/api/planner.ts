@@ -13,7 +13,15 @@ export const plannerApi = {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || 'Failed to generate plan');
+      let msg = 'Failed to generate plan';
+      if (Array.isArray(err.detail)) {
+        msg = err.detail.map((e: any) => `${e.loc ? e.loc.filter((x: any) => x !== 'body').join('.') : 'error'}: ${e.msg}`).join('; ');
+      } else if (typeof err.detail === 'string') {
+        msg = err.detail;
+      } else if (err.detail) {
+        msg = JSON.stringify(err.detail);
+      }
+      throw new Error(msg);
     }
     return res.json();
   }
