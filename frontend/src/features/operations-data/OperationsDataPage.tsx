@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { operationsApi } from '@/api/operations';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -6,7 +6,7 @@ import { AlertCircle, CheckCircle } from 'lucide-react';
 
 export default function OperationsDataPage() {
   const queryClient = useQueryClient();
-  const { data: summary, isLoading, isError, error, refetch } = useQuery({
+  const { data: summary, isLoading, isError, refetch } = useQuery({
     queryKey: ['operations-summary'],
     queryFn: operationsApi.getSummary,
   });

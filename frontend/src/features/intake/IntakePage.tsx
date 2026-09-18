@@ -74,11 +74,11 @@ export default function IntakePage() {
                     <div key={t.id || t.task_id} className="bg-white border border-slate-200 p-3 rounded shadow-sm text-sm">
                       <div className="flex justify-between items-center mb-1">
                         <span className="font-mono font-bold text-xs">{t.source_system} - {t.id || t.task_id}</span>
-                        <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${t.status === 'COMPLETE' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
-                          {t.status}
+                        <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${t.data_quality_status === 'COMPLETE' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
+                          {t.data_quality_status}
                         </span>
                       </div>
-                      {t.status === 'NEEDS_REVIEW' && t.review_reasons?.length > 0 && (
+                      {t.data_quality_status === 'NEEDS_REVIEW' && t.review_reasons?.length > 0 && (
                         <div className="text-xs text-amber-700 mt-2 bg-amber-50 p-1.5 rounded">
                           {t.review_reasons[0]}
                         </div>
@@ -192,12 +192,15 @@ function TaskForm({ onSuccess }: { onSuccess: () => void }) {
     severity: 'MEDIUM',
     record: '',
     estimated_duration_minutes: '',
-    due_date: '',
+    proposed_block_datetime: '',
+    section_latitude: '',
+    section_longitude: '',
     required_crews: '',
     required_equipment: '',
     requires_traffic_block: false,
     requires_traction_disconnection: false,
-    co_working_compatible: false
+    co_working_compatible: false,
+    co_working_departments: [] as string[]
   });
 
   const mutation = useMutation({
@@ -227,12 +230,15 @@ function TaskForm({ onSuccess }: { onSuccess: () => void }) {
       planning_context: {
         severity: formData.severity,
         estimated_duration_minutes: Number(formData.estimated_duration_minutes),
-        due_date: formData.due_date,
+        proposed_block_datetime: formData.proposed_block_datetime,
+        section_latitude: Number(formData.section_latitude),
+        section_longitude: Number(formData.section_longitude),
         required_crews: formData.required_crews.split('\n').filter(Boolean),
         required_equipment: formData.required_equipment.split('\n').filter(Boolean),
         requires_traffic_block: formData.requires_traffic_block,
         requires_traction_disconnection: formData.requires_traction_disconnection,
-        co_working_compatible: formData.co_working_compatible
+        co_working_compatible: formData.co_working_compatible,
+        co_working_departments: formData.co_working_departments
       }
     });
   };
@@ -247,15 +253,15 @@ function TaskForm({ onSuccess }: { onSuccess: () => void }) {
       )}
       
       {mutation.isSuccess && mutation.data && (
-        <div id="result-output" className={`p-4 rounded border text-sm ${mutation.data.status === 'COMPLETE' ? 'bg-green-50 border-green-200 text-green-900' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
+        <div id="result-output" className={`p-4 rounded border text-sm ${mutation.data.data_quality_status === 'COMPLETE' ? 'bg-green-50 border-green-200 text-green-900' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
           <div id="result-caption" className="font-bold mb-2 flex items-center gap-2">
-            {mutation.data.status === 'COMPLETE' ? <CheckCircle className="w-5 h-5 text-green-600" /> : <AlertCircle className="w-5 h-5 text-amber-600" />}
-            {mutation.data.status === 'COMPLETE' ? 'Normalization Complete' : 'Review Required'}
+            {mutation.data.data_quality_status === 'COMPLETE' ? <CheckCircle className="w-5 h-5 text-green-600" /> : <AlertCircle className="w-5 h-5 text-amber-600" />}
+            {mutation.data.data_quality_status === 'COMPLETE' ? 'Normalization Complete' : 'Review Required'}
           </div>
-          {mutation.data.status === 'COMPLETE' ? (
+          {mutation.data.data_quality_status === 'COMPLETE' ? (
             <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-              <div>Task ID: {mutation.data.task_id}</div>
-              <div>Section: {mutation.data.normalized_data?.section}</div>
+              <div>Task ID: {mutation.data.normalized_task?.id}</div>
+              <div>Section: {mutation.data.normalized_task?.section_id}</div>
             </div>
           ) : (
             <ul className="list-disc pl-5 mt-2 space-y-1 text-xs">
@@ -313,8 +319,17 @@ function TaskForm({ onSuccess }: { onSuccess: () => void }) {
           <input required type="number" min="1" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.estimated_duration_minutes} onChange={e => setFormData(p => ({ ...p, estimated_duration_minutes: e.target.value }))} />
         </div>
         <div className="space-y-1.5">
-          <label className="text-sm font-semibold text-slate-700">Due Date</label>
-          <input required type="datetime-local" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.due_date} onChange={e => setFormData(p => ({ ...p, due_date: e.target.value }))} />
+          <label className="text-sm font-semibold text-slate-700">Proposed Block Date and Time</label>
+          <input required type="datetime-local" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.proposed_block_datetime} onChange={e => setFormData(p => ({ ...p, proposed_block_datetime: e.target.value }))} />
+          <p className="text-xs text-slate-500">Priority traffic density uses this time to select the correct six-hour slot.</p>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-semibold text-slate-700">Section Latitude</label>
+          <input required type="number" step="any" min="-90" max="90" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.section_latitude} onChange={e => setFormData(p => ({ ...p, section_latitude: e.target.value }))} />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-semibold text-slate-700">Section Longitude</label>
+          <input required type="number" step="any" min="-180" max="180" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.section_longitude} onChange={e => setFormData(p => ({ ...p, section_longitude: e.target.value }))} />
         </div>
         <div className="space-y-1.5">
           <label className="text-sm font-semibold text-slate-700">Required Crews (One per line)</label>
@@ -337,14 +352,41 @@ function TaskForm({ onSuccess }: { onSuccess: () => void }) {
         </label>
         <label className="flex items-center gap-2 text-sm text-slate-700">
           <input type="checkbox" checked={formData.co_working_compatible} onChange={e => setFormData(p => ({ ...p, co_working_compatible: e.target.checked }))} />
-          Co-working Compatible
+          Cross-Department Dependency (Optional)
         </label>
+        {formData.co_working_compatible && (
+          <div className="border-t border-slate-200 pt-3">
+            <div className="text-xs font-semibold text-slate-600 mb-2">Co-working departments</div>
+            <div className="flex flex-wrap gap-4">
+              {[
+                ['TDMS', 'Requires OHE/Traction Support'],
+                ['SMMS', 'Requires S&T Support'],
+                ['TMS', 'Requires Engineering Support'],
+              ].map(([system, label]) => (
+                <label key={system} className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={formData.co_working_departments.includes(system)}
+                    onChange={e => setFormData(current => ({
+                      ...current,
+                      co_working_departments: e.target.checked
+                        ? [...current.co_working_departments, system]
+                        : current.co_working_departments.filter(value => value !== system)
+                    }))}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            {formData.co_working_departments.length === 0 && <p className="text-xs text-red-600 mt-2">Select at least one co-working department.</p>}
+          </div>
+        )}
       </div>
 
       <div className="pt-6 mt-4 border-t border-slate-200">
         <button 
           type="submit" 
-          disabled={mutation.isPending}
+          disabled={mutation.isPending || (formData.co_working_compatible && formData.co_working_departments.length === 0)}
           className="w-full md:w-auto px-8 py-3 bg-primary text-white rounded font-bold hover:bg-primary/90 disabled:opacity-50 text-base shadow-sm transition-all"
         >
           {mutation.isPending ? 'Registering...' : 'Register Maintenance Record'}

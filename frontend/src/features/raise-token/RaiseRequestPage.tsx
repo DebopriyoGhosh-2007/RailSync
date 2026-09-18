@@ -113,7 +113,7 @@ export default function RaiseRequestPage() {
   const schema = getFormSchemaForDepartment(department);
   const sourceSystem = DEPT_TO_SOURCE[department];
 
-  const { register, handleSubmit, control, formState: { errors }, reset, getValues } = useForm({
+  const { register, handleSubmit, control, formState: { errors: rawErrors }, reset } = useForm<any>({
     resolver: zodResolver(schema),
     defaultValues: {
       source_system: sourceSystem,
@@ -128,6 +128,7 @@ export default function RaiseRequestPage() {
       }
     }
   });
+  const errors = rawErrors as any;
 
   const { data: pastTasks = [] } = useQuery({
     queryKey: ['tasks', sourceSystem],
@@ -246,11 +247,11 @@ export default function RaiseRequestPage() {
             <Card className="border-primary bg-primary/5">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-primary">
-                  {submitResult.data.status === 'NEEDS_REVIEW' ? 'Needs Review' : submitResult.status === 409 ? 'Duplicate Record Found' : 'Submission Complete'}
+                  {submitResult.data.data_quality_status === 'NEEDS_REVIEW' ? 'Needs Review' : submitResult.status === 409 ? 'Duplicate Record Found' : 'Submission Complete'}
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                {submitResult.data.status === 'NEEDS_REVIEW' && (
+                {submitResult.data.data_quality_status === 'NEEDS_REVIEW' && (
                   <div className="bg-white p-4 rounded border text-sm">
                     <p className="font-semibold mb-2">The system flagged this record for manual review:</p>
                     <ul className="list-disc pl-5 space-y-1">
@@ -259,17 +260,22 @@ export default function RaiseRequestPage() {
                   </div>
                 )}
                 <div className="bg-white p-4 rounded border grid grid-cols-2 gap-4 text-sm font-mono">
-                  <div><span className="text-muted-foreground">ID:</span> {submitResult.data.task_id}</div>
-                  <div><span className="text-muted-foreground">Status:</span> {submitResult.data.status}</div>
-                  {submitResult.data.normalized_data?.section && (
-                    <div><span className="text-muted-foreground">Section:</span> {submitResult.data.normalized_data.section}</div>
+                  <div><span className="text-muted-foreground">ID:</span> {submitResult.data.ingestion_id}</div>
+                  <div><span className="text-muted-foreground">Status:</span> {submitResult.data.data_quality_status}</div>
+                  {submitResult.data.normalized_task?.section_id && (
+                    <div><span className="text-muted-foreground">Section:</span> {submitResult.data.normalized_task.section_id}</div>
                   )}
-                  {submitResult.data.normalized_data?.km_start !== undefined && (
-                    <div><span className="text-muted-foreground">KM Range:</span> {submitResult.data.normalized_data.km_start} - {submitResult.data.normalized_data.km_end}</div>
+                  {submitResult.data.normalized_task?.start_km !== undefined && (
+                    <div><span className="text-muted-foreground">KM Range:</span> {submitResult.data.normalized_task.start_km} - {submitResult.data.normalized_task.end_km}</div>
                   )}
                 </div>
                 <div className="flex gap-4 pt-4">
                   <Button onClick={handleReset}>Raise another request</Button>
+                  {submitResult.data.normalized_task?.id && (
+                    <Button variant="outline" onClick={() => navigate('/feasibility', { state: { taskId: submitResult.data.normalized_task.id } })}>
+                      Continue to feasibility
+                    </Button>
+                  )}
                   <Button variant="outline" onClick={() => navigate('/')}>Go to full RailSync dashboard</Button>
                 </div>
               </CardContent>
@@ -305,11 +311,25 @@ export default function RaiseRequestPage() {
                       {...register("planning_context.estimated_duration_minutes", { valueAsNumber: true })} 
                       error={errors.planning_context?.estimated_duration_minutes?.message as string} 
                     />
-                    <Input 
-                      label="Due Date and Time" 
-                      type="datetime-local" 
-                      {...register("planning_context.due_date")} 
-                      error={errors.planning_context?.due_date?.message as string} 
+                    <Input
+                      label="Proposed Block Time"
+                      type="datetime-local"
+                      {...register("planning_context.proposed_block_datetime")}
+                      error={errors.planning_context?.proposed_block_datetime?.message as string}
+                    />
+                    <Input
+                      label="Section Latitude"
+                      type="number"
+                      step="any"
+                      {...register("planning_context.section_latitude", { valueAsNumber: true })}
+                      error={errors.planning_context?.section_latitude?.message as string}
+                    />
+                    <Input
+                      label="Section Longitude"
+                      type="number"
+                      step="any"
+                      {...register("planning_context.section_longitude", { valueAsNumber: true })}
+                      error={errors.planning_context?.section_longitude?.message as string}
                     />
                   </div>
 
@@ -374,13 +394,13 @@ export default function RaiseRequestPage() {
             <p className="text-sm text-muted-foreground text-center mt-4">No recent submissions found.</p>
           ) : (
             pastTasks.map((task: any) => (
-              <div key={task.task_id} className="bg-white p-3 rounded border text-sm shadow-sm">
+              <div key={task.ingestion_id} className="bg-white p-3 rounded border text-sm shadow-sm">
                 <div className="flex justify-between items-start mb-2">
-                  <span className="font-mono text-xs font-semibold">{task.task_id.substring(0, 8)}...</span>
-                  <Badge variant={task.status === 'COMPLETE' ? 'success' : task.status === 'NEEDS_REVIEW' ? 'warning' : 'outline'}>{task.status}</Badge>
+                  <span className="font-mono text-xs font-semibold">{task.ingestion_id.substring(0, 8)}...</span>
+                  <Badge variant={task.data_quality_status === 'COMPLETE' ? 'success' : task.data_quality_status === 'NEEDS_REVIEW' ? 'warning' : 'outline'}>{task.data_quality_status}</Badge>
                 </div>
                 <div className="text-muted-foreground text-xs truncate">
-                  {task.record?.ticket_id || task.record?.fault_id || task.record?.defect_no || 'Unknown Reference'}
+                  {task.source_reference || task.normalized_task?.source_reference || 'Unknown Reference'}
                 </div>
               </div>
             ))

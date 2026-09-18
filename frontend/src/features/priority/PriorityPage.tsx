@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { intakeApi } from '@/api/intake';
 import { priorityApi } from '@/api/priority';
@@ -6,43 +7,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, Calculator } from 'lucide-react';
 
 export default function PriorityPage() {
+  const location = useLocation();
   const { data: tasks, isLoading: tasksLoading } = useQuery({
     queryKey: ['ingestion-tasks'],
     queryFn: intakeApi.getTasks,
   });
 
   const [context, setContext] = useState({
-    task_id: '',
-    passenger: '',
-    goods: '',
-    traffic: '',
-    criticality: '',
-    restriction: false
-  });
-
-  const [policy, setPolicy] = useState({
-    version: '2026.Q3.POL',
-    sevCritical: '100',
-    sevHigh: '75',
-    sevMedium: '50',
-    sevLow: '25',
-    maxOverdue: '90',
-    maxPassenger: '100',
-    maxGoods: '50',
-    maxTraffic: '200',
-    restrictionScore: '30',
-    maxWeather: '2',
-    wSeverity: '0.3',
-    wOverdue: '0.1',
-    wPassenger: '0.15',
-    wGoods: '0.1',
-    wTraffic: '0.1',
-    wRestriction: '0.1',
-    wRoute: '0.1',
-    wWeather: '0.05',
-    criticalThreshold: '80',
-    highThreshold: '60',
-    mediumThreshold: '40'
+    task_id: ''
   });
 
   const mutation = useMutation({
@@ -53,47 +25,24 @@ export default function PriorityPage() {
     e.preventDefault();
     if (!context.task_id) return;
 
-    mutation.mutate({
-      context: {
-        task_id: context.task_id,
-        passenger_trains_per_day: Number(context.passenger),
-        goods_forecast_per_day: Number(context.goods),
-        section_traffic_gmt: Number(context.traffic),
-        route_criticality_score: Number(context.criticality),
-        active_operational_restriction: context.restriction
-      },
-      policy: {
-        version: policy.version,
-        severity_scores: {
-          CRITICAL: Number(policy.sevCritical),
-          HIGH: Number(policy.sevHigh),
-          MEDIUM: Number(policy.sevMedium),
-          LOW: Number(policy.sevLow)
-        },
-        max_overdue_days: Number(policy.maxOverdue),
-        max_passenger_trains: Number(policy.maxPassenger),
-        max_goods_trains: Number(policy.maxGoods),
-        max_section_traffic: Number(policy.maxTraffic),
-        active_restriction_score: Number(policy.restrictionScore),
-        max_weather_risk: Number(policy.maxWeather),
-        factor_weights: {
-          severity: Number(policy.wSeverity),
-          overdue_age: Number(policy.wOverdue),
-          passenger_demand: Number(policy.wPassenger),
-          goods_demand: Number(policy.wGoods),
-          traffic: Number(policy.wTraffic),
-          restriction: Number(policy.wRestriction),
-          route_criticality: Number(policy.wRoute),
-          weather: Number(policy.wWeather)
-        },
-        critical_threshold: Number(policy.criticalThreshold),
-        high_threshold: Number(policy.highThreshold),
-        medium_threshold: Number(policy.mediumThreshold)
-      }
-    });
+    mutation.mutate({ context: { task_id: context.task_id } });
   };
 
-  const completeTasks = tasks?.filter((t: any) => t.status === 'COMPLETE') || [];
+  const completeTasks = tasks?.filter((t: any) => t.data_quality_status === 'COMPLETE' && t.normalized_task) || [];
+  const trafficContext = useQuery({
+    queryKey: ['priority-task-context', context.task_id],
+    queryFn: () => priorityApi.getTaskContext(context.task_id),
+    enabled: Boolean(context.task_id),
+  });
+  const selectedTime = trafficContext.data?.proposed_block_datetime;
+  const slot = trafficContext.data?.slot_key;
+  const slotPassenger = trafficContext.data?.active_passenger_count;
+  const slotGoods = trafficContext.data?.active_goods_count;
+
+  useEffect(() => {
+    const taskId = (location.state as { taskId?: string } | null)?.taskId;
+    if (taskId && completeTasks.some((task: any) => task.normalized_task.id === taskId)) setContext({ task_id: taskId });
+  }, [location.state, tasks]);
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -123,55 +72,47 @@ export default function PriorityPage() {
                     <select id="priority-task" required className="w-full border-slate-300 rounded text-sm p-2 border" value={context.task_id} onChange={e => setContext(p => ({ ...p, task_id: e.target.value }))}>
                       <option value="">-- Select a complete task --</option>
                       {completeTasks.map((t: any) => (
-                        <option key={t.task_id} value={t.task_id}>{t.task_id} - {t.department}</option>
+                        <option key={t.normalized_task.id} value={t.normalized_task.id}>{t.normalized_task.id} - {t.normalized_task.department}</option>
                       ))}
                     </select>
                   )}
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700">Passenger Trains/Day</label>
-                  <input required type="number" min="0" className="w-full border-slate-300 rounded text-sm p-2 border" value={context.passenger} onChange={e => setContext(p => ({ ...p, passenger: e.target.value }))} />
+                <div className="col-span-2 rounded border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                  Traffic and weather inputs are drawn automatically from F-01/F-02. Approved F-07/F-08 cockpit policy supplies the weights and thresholds; only the explainable result is shown here.
                 </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700">Goods Forecast/Day</label>
-                  <input required type="number" min="0" className="w-full border-slate-300 rounded text-sm p-2 border" value={context.goods} onChange={e => setContext(p => ({ ...p, goods: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700">Section Traffic GMT</label>
-                  <input required type="number" min="0" className="w-full border-slate-300 rounded text-sm p-2 border" value={context.traffic} onChange={e => setContext(p => ({ ...p, traffic: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700">Route Criticality (0-100)</label>
-                  <input required type="number" min="0" max="100" className="w-full border-slate-300 rounded text-sm p-2 border" value={context.criticality} onChange={e => setContext(p => ({ ...p, criticality: e.target.value }))} />
-                </div>
-                <div className="col-span-2 space-y-1.5 mt-2">
-                  <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-                    <input type="checkbox" checked={context.restriction} onChange={e => setContext(p => ({ ...p, restriction: e.target.checked }))} />
-                    Active Operational Restriction
-                  </label>
-                </div>
-              </div>
-            </section>
-
-            <section>
-              <h3 className="text-sm font-bold border-b pb-2 mb-4">Policy Configuration</h3>
-              <div className="grid grid-cols-4 gap-4 bg-slate-50 p-4 border border-slate-200 rounded">
-                <div className="space-y-1.5 col-span-2">
-                  <label className="text-xs font-semibold text-slate-700">Policy Version</label>
-                  <input required type="text" className="w-full border-slate-300 rounded text-xs p-1.5 border" value={policy.version} onChange={e => setPolicy(p => ({ ...p, version: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5 col-span-2">
-                  <label className="text-xs font-semibold text-slate-700">Weight: Severity / Overdue / Passenger / Goods</label>
-                  <div className="flex gap-1">
-                    <input type="number" step="0.01" className="w-1/4 border-slate-300 rounded text-xs p-1.5 border" value={policy.wSeverity} onChange={e => setPolicy(p => ({ ...p, wSeverity: e.target.value }))} />
-                    <input type="number" step="0.01" className="w-1/4 border-slate-300 rounded text-xs p-1.5 border" value={policy.wOverdue} onChange={e => setPolicy(p => ({ ...p, wOverdue: e.target.value }))} />
-                    <input type="number" step="0.01" className="w-1/4 border-slate-300 rounded text-xs p-1.5 border" value={policy.wPassenger} onChange={e => setPolicy(p => ({ ...p, wPassenger: e.target.value }))} />
-                    <input type="number" step="0.01" className="w-1/4 border-slate-300 rounded text-xs p-1.5 border" value={policy.wGoods} onChange={e => setPolicy(p => ({ ...p, wGoods: e.target.value }))} />
+                <div className="col-span-2 grid grid-cols-3 gap-3 rounded border border-indigo-100 bg-indigo-50 p-4 text-sm">
+                  <div>
+                    <span className="block text-xs font-semibold uppercase text-indigo-700">Active Traffic Slot</span>
+                    <span id="slot-timeframe">{trafficContext.data?.slot_timeframe ?? (trafficContext.isFetching ? 'Loading…' : 'Select a task')}</span>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold uppercase text-indigo-700">Active Passenger Count</span>
+                    <span id="active-passenger-count">{trafficContext.data?.active_passenger_count ?? '—'}</span>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold uppercase text-indigo-700">Active Goods Count</span>
+                    <span id="active-goods-count">{trafficContext.data?.active_goods_count ?? '—'}</span>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold uppercase text-indigo-700">Weather Risk (F-02)</span>
+                    <span id="dyn-weather">{trafficContext.data?.weather_risk ?? '--'}</span>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold uppercase text-indigo-700">Route Criticality</span>
+                    <span id="dyn-criticality">{trafficContext.data?.route_criticality ?? '--'}</span>
+                  </div>
+                  <div>
+                    <span className="block text-xs font-semibold uppercase text-indigo-700">TSR Penalty</span>
+                    <span id="dyn-tsr">{trafficContext.data?.tsr_penalty ?? '--'}</span>
                   </div>
                 </div>
-                <div className="space-y-1.5 col-span-4 text-xs text-slate-500 italic mt-1">
-                  Additional configuration exists. Only exposed partial policy UI for space.
-                </div>
+                {selectedTime && slot && (
+                  <div className="col-span-2 grid grid-cols-3 gap-3 rounded border border-indigo-100 bg-indigo-50 p-4 text-sm">
+                    <div><span className="block text-xs font-semibold uppercase text-indigo-700">Proposed time (UTC)</span>{selectedTime.replace('T', ' ').slice(0, 16)}</div>
+                    <div><span className="block text-xs font-semibold uppercase text-indigo-700">Passenger setting · {slot}</span>{slotPassenger ?? 'No approved policy'}</div>
+                    <div><span className="block text-xs font-semibold uppercase text-indigo-700">Goods setting · {slot}</span>{slotGoods ?? 'No approved policy'}</div>
+                  </div>
+                )}
               </div>
             </section>
 
@@ -218,16 +159,22 @@ export default function PriorityPage() {
 
                 <div className="bg-slate-800 rounded p-4 text-sm font-mono space-y-3 border border-slate-700">
                   <div className="text-xs text-slate-400 uppercase font-sans font-bold border-b border-slate-700 pb-2 mb-2">Contribution Breakdown</div>
-                  {Object.entries(mutation.data.factor_breakdown).map(([factor, data]: [string, any]) => (
-                    <div key={factor} className="flex justify-between items-center text-xs">
-                      <span className="text-slate-300 capitalize">{factor.replace('_', ' ')}</span>
+                  {mutation.data.top_contributing_factors.map((data: any) => (
+                    <div key={data.factor} className="flex justify-between items-center text-xs">
+                      <span className="text-slate-300">{data.factor}</span>
                       <div className="flex items-center gap-4 text-slate-500">
                         <span className="w-20 text-right">Raw: {data.input_score.toFixed(1)}</span>
                         <span className="w-16 text-right">W: {data.weight}</span>
-                        <span className="w-16 text-right font-bold text-white">+{data.contribution.toFixed(1)}</span>
+                        <span className="w-16 text-right font-bold text-white">+{data.score_contribution.toFixed(1)}</span>
                       </div>
                     </div>
                   ))}
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-xs font-mono text-slate-400">
+                  <span>Data: {mutation.data.operational_data_source === 'INGESTED_RECORDS' ? 'Ingested records' : 'Policy fallback'}</span>
+                  <span>Passenger: {mutation.data.passenger_traffic}</span>
+                  <span>Goods: {mutation.data.goods_traffic}</span>
                 </div>
 
                 <div className="text-xs text-slate-500 font-mono text-center">
@@ -241,3 +188,4 @@ export default function PriorityPage() {
     </div>
   );
 }
+

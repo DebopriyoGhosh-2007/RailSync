@@ -4,7 +4,9 @@ import { Department } from "@/auth/types";
 export const planningContextSchema = z.object({
   severity: z.enum(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
   estimated_duration_minutes: z.number().min(1, "Duration must be at least 1 minute"),
-  due_date: z.string().min(1, "Due date is required"),
+  proposed_block_datetime: z.string().min(1, "Proposed block time is required"),
+  section_latitude: z.number().min(-90).max(90),
+  section_longitude: z.number().min(-180).max(180),
   required_crews: z.array(z.string()).min(1, "At least one crew is required"),
   required_equipment: z.array(z.string()),
   requires_traffic_block: z.boolean().default(false),

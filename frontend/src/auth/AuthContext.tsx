@@ -9,7 +9,7 @@ import {
 import { FirebaseError } from 'firebase/app';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from './firebase';
-import { UserProfile, Department } from './types';
+import { UserProfile } from './types';
 
 interface AuthContextType {
   user: User | null;
@@ -57,8 +57,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!auth || !auth.name) {
-      // Firebase not configured, mock loading finish so we don't block the screen
-      setLoading(false);
+      // Firebase not configured, fetch backend identity for local/dev session
+      fetch('/api/v1/cockpit/identity')
+        .then((r) => (r.ok ? r.json() : Promise.reject(r)))
+        .then((data) => {
+          const devUser = {
+            uid: 'local-dev-user',
+            email: 'ananda.jana@railsync.gov.in',
+            displayName: data.actor || 'Ananda Jana',
+          } as unknown as User;
+          const devProfile: UserProfile = {
+            uid: 'local-dev-user',
+            email: 'ananda.jana@railsync.gov.in',
+            fullName: data.actor || 'Ananda Jana',
+            role: data.role || 'Section Controller',
+            department: 'Operations',
+            employeeId: 'RS-1001',
+            section: 'Howrah-Bardhaman Chord',
+            createdAt: new Date().toISOString(),
+          };
+          setUser(devUser);
+          setProfile(devProfile);
+        })
+        .catch(() => {
+          const devUser = {
+            uid: 'local-dev-user',
+            email: 'ananda.jana@railsync.gov.in',
+            displayName: 'Ananda Jana',
+          } as unknown as User;
+          const devProfile: UserProfile = {
+            uid: 'local-dev-user',
+            email: 'ananda.jana@railsync.gov.in',
+            fullName: 'Ananda Jana',
+            role: 'Section Controller',
+            department: 'Operations',
+            employeeId: 'RS-1001',
+            section: 'Howrah-Bardhaman Chord',
+            createdAt: new Date().toISOString(),
+          };
+          setUser(devUser);
+          setProfile(devProfile);
+        })
+        .finally(() => {
+          setLoading(false);
+        });
       return;
     }
 
@@ -90,6 +132,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signIn = async (email: string, password: string) => {
+    if (!auth || !auth.name) {
+      throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to frontend/.env and restart Vite.');
+    }
+
     try {
       await signInWithEmailAndPassword(auth, email, password);
     } catch (error) {
@@ -102,6 +148,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     password: string, 
     profileData: Omit<UserProfile, 'uid' | 'createdAt' | 'email'>
   ) => {
+    if (!auth || !auth.name) {
+      throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to frontend/.env and restart Vite.');
+    }
+
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const newUser = userCredential.user;

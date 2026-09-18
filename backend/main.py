@@ -10,7 +10,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -21,9 +21,10 @@ import hashlib
 import io
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.memo_generator import generate_sanction_memo_html, generate_sanction_memo_pdf
 
@@ -33,6 +34,12 @@ DATABASE = ROOT / "rail_sync.db"
 
 
 class SourceSystem(StrEnum):
+    TMS = "TMS"
+    SMMS = "SMMS"
+    TDMS = "TDMS"
+
+
+class CoWorkingSystem(StrEnum):
     TMS = "TMS"
     SMMS = "SMMS"
     TDMS = "TDMS"
@@ -70,18 +77,35 @@ class ReferenceRegistration(BaseModel):
 class PlanningContext(BaseModel):
     severity: Severity
     estimated_duration_minutes: int = Field(gt=0, le=10080)
-    due_date: datetime
+    due_date: datetime | None = None
+    proposed_block_datetime: datetime
+    section_latitude: float | None = Field(default=None, ge=-90, le=90)
+    section_longitude: float | None = Field(default=None, ge=-180, le=180)
     required_crews: list[str] = Field(min_length=1)
     required_equipment: list[str] = Field(min_length=1)
     requires_traffic_block: bool
     requires_traction_disconnection: bool
     co_working_compatible: bool
+    co_working_departments: list[CoWorkingSystem] = Field(default_factory=list)
 
-    @field_validator("due_date")
+    @model_validator(mode="after")
+    def co_working_selection_is_consistent(self) -> "PlanningContext":
+        if self.co_working_compatible and not self.co_working_departments:
+            raise ValueError("Select at least one co-working department when co-working is enabled.")
+        if not self.co_working_compatible and self.co_working_departments:
+            raise ValueError("Co-working departments require co-working to be enabled.")
+        # The proposed block time is the single required planning date in the
+        # intake UI. Preserve due_date internally for existing scheduling and
+        # audit consumers without asking departments to enter it twice.
+        if self.due_date is None:
+            self.due_date = self.proposed_block_datetime
+        return self
+
+    @field_validator("due_date", "proposed_block_datetime")
     @classmethod
-    def due_date_must_be_timezone_aware(cls, value: datetime) -> datetime:
+    def due_date_must_be_timezone_aware(cls, value: datetime | None) -> datetime | None:
         """HTML datetime-local values have no offset; store them consistently as UTC."""
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value is None or value.tzinfo else value.replace(tzinfo=timezone.utc)
 
     @field_validator("required_crews", "required_equipment")
     @classmethod
@@ -112,12 +136,16 @@ class NormalizedTask(BaseModel):
     severity: Severity
     overdue: bool
     due_date: datetime
+    proposed_block_datetime: datetime | None = None
+    section_latitude: float | None = None
+    section_longitude: float | None = None
     estimated_duration_minutes: int
     required_crews: list[str]
     required_equipment: list[str]
     requires_traffic_block: bool
     requires_traction_disconnection: bool
     co_working_compatible: bool
+    co_working_departments: list[CoWorkingSystem] = Field(default_factory=list)
     data_quality_status: str
 
 
@@ -131,21 +159,53 @@ class FeasibilityRules(BaseModel):
 
 class FeasibilityRequest(BaseModel):
     task_id: str = Field(min_length=1)
-    section_latitude: float = Field(ge=-90, le=90)
-    section_longitude: float = Field(ge=-180, le=180)
-    proposed_time: datetime
-    rules: FeasibilityRules
+    proposed_time: datetime | None = None
 
     @field_validator("proposed_time")
     @classmethod
-    def proposed_time_must_be_timezone_aware(cls, value: datetime) -> datetime:
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    def proposed_time_must_be_timezone_aware(cls, value: datetime | None) -> datetime | None:
+        return value if value is None or value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+ACTIVE_COA_POLICY: dict[str, float | None] = {
+    "eng_max_temp": 45.0,
+    "trac_max_wind": 60.0,
+    "traf_min_visibility": 1000.0,
+    "caution_risk_multiplier": 1.25,
+    "passenger_00_06": 5.0,
+    "passenger_06_12": 22.0,
+    "passenger_12_18": 15.0,
+    "passenger_18_24": 5.0,
+    "goods_00_06": 8.0,
+    "goods_06_12": 2.0,
+    "goods_12_18": 2.0,
+    "goods_18_24": 3.0,
+    "route_criticality": None,
+    "tsr_penalty": None,
+}
+
+
+class COAFeasibilityPolicy(BaseModel):
+    eng_max_temp: float = Field(ge=-100, le=100)
+    trac_max_wind: float = Field(ge=0)
+    traf_min_visibility: float = Field(ge=0)
+    caution_risk_multiplier: float = Field(ge=1, le=2)
+    route_criticality: float | None = Field(default=None, ge=0, le=100)
+    tsr_penalty: float | None = Field(default=None, ge=0, le=100)
 
 
 class PriorityPolicy(BaseModel):
     policy_version: str = Field(min_length=1, max_length=100)
     severity_scores: dict[Severity, float]
     max_days_overdue: float = Field(gt=0)
+    passenger_00_06: float = Field(default=5, ge=0)
+    passenger_06_12: float = Field(default=22, ge=0)
+    passenger_12_18: float = Field(default=15, ge=0)
+    passenger_18_24: float = Field(default=5, ge=0)
+    goods_00_06: float = Field(default=8, ge=0)
+    goods_06_12: float = Field(default=2, ge=0)
+    goods_12_18: float = Field(default=2, ge=0)
+    goods_18_24: float = Field(default=3, ge=0)
     max_passenger_trains_per_day: float = Field(gt=0)
     max_goods_trains_per_day: float = Field(gt=0)
     max_section_traffic_gmt: float = Field(gt=0)
@@ -178,11 +238,11 @@ class PriorityPolicy(BaseModel):
 
 class PriorityContext(BaseModel):
     task_id: str = Field(min_length=1)
-    passenger_train_frequency_per_day: float = Field(ge=0)
-    goods_train_forecast_per_day: float = Field(ge=0)
-    section_traffic_gmt: float = Field(ge=0)
-    route_criticality_score: float = Field(ge=0, le=100)
-    active_operational_restriction: bool
+    passenger_train_frequency_per_day: float = Field(default=0, ge=0)
+    goods_train_forecast_per_day: float = Field(default=0, ge=0)
+    section_traffic_gmt: float = Field(default=0, ge=0)
+    route_criticality_score: float = Field(default=0, ge=0, le=100)
+    active_operational_restriction: bool = False
 
 
 class PriorityRequest(BaseModel):
@@ -192,8 +252,8 @@ class PriorityRequest(BaseModel):
 
     @model_validator(mode="after")
     def exactly_one_policy_source_is_supplied(self) -> "PriorityRequest":
-        if (self.policy is None) == (self.policy_id is None):
-            raise ValueError("Supply exactly one of policy or policy_id.")
+        if self.policy is not None and self.policy_id is not None:
+            raise ValueError("Supply only one of policy or policy_id.")
         return self
 
 
@@ -232,6 +292,7 @@ class BlockPlanRequest(BaseModel):
     horizon_start: datetime
     horizon_end: datetime
     coa_windows: list[CorridorWindow] = Field(min_length=1)
+    selected_task_ids: list[str] = Field(default_factory=list)
 
     @field_validator("horizon_start", "horizon_end")
     @classmethod
@@ -597,17 +658,56 @@ def persist_review(request: IngestionRequest, reason: str, source_reference: str
 
 
 app = FastAPI(title="RailSync F-01 Ingestion API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/api/v1/coa-policy")
+def get_coa_policy() -> dict[str, float | None]:
+    return ACTIVE_COA_POLICY.copy()
+
+
+@app.put("/api/v1/coa-policy")
+def update_coa_policy(policy: COAFeasibilityPolicy) -> dict[str, float | None]:
+    ACTIVE_COA_POLICY.update(policy.model_dump())
+    return ACTIVE_COA_POLICY.copy()
 app.mount("/static", StaticFiles(directory=ROOT), name="static")
+
+FRONTEND_DIST = ROOT / "frontend" / "dist"
+if (FRONTEND_DIST / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="frontend_assets")
+
+
+@app.get("/app", include_in_schema=False)
+@app.get("/app/{full_path:path}", include_in_schema=False)
+def serve_react_app(full_path: str = "") -> HTMLResponse:
+    index_file = FRONTEND_DIST / "index.html"
+    if index_file.exists():
+        return HTMLResponse(index_file.read_text(encoding="utf-8"), headers={"Cache-Control": "no-store"})
+    return HTMLResponse("<h1>React App not built yet. Run 'npm run build' in RailSync/frontend.</h1>", status_code=404)
 
 
 def render_page(filename: str) -> HTMLResponse:
     page = (ROOT / filename).read_text(encoding="utf-8")
-    if 'href="/cockpit"' not in page:
-        page = page.replace(
-            "</nav>",
-            '<a class="nav-link" href="/cockpit">Cockpit</a></nav>',
-            1,
-        )
+    if 'href="/app"' not in page:
+        if 'href="/cockpit"' in page:
+            page = page.replace(
+                'href="/cockpit">Cockpit</a>',
+                'href="/cockpit">Cockpit</a><a class="nav-link" href="/app">React App</a>',
+                1,
+            )
+        elif '</nav>' in page:
+            page = page.replace(
+                "</nav>",
+                '<a class="nav-link" href="/cockpit">Cockpit</a><a class="nav-link" href="/app">React App</a></nav>',
+                1,
+            )
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
@@ -727,17 +827,22 @@ def ingest_task(request: IngestionRequest) -> dict[str, Any]:
     if start_km < mapping["start_km"] or end_km > mapping["end_km"]:
         return persist_review(request, "The source kilometre range falls outside the registered controlled reference.", source_id)
 
+    planning_due_date = request.planning_context.due_date or request.planning_context.proposed_block_datetime
     task = NormalizedTask(
         id=source_id, source_system=request.source_system, source_reference=lookup_reference,
         source_timestamp=source_timestamp, department=department, asset_type=mapping["asset_type"],
         asset_reference=mapping["asset_reference"], section_id=mapping["section_id"], start_km=start_km, end_km=end_km,
         maintenance_type=maintenance_type, severity=request.planning_context.severity,
-        overdue=request.planning_context.due_date < now(), due_date=request.planning_context.due_date,
+        overdue=planning_due_date < now(), due_date=planning_due_date,
+        proposed_block_datetime=request.planning_context.proposed_block_datetime,
         estimated_duration_minutes=request.planning_context.estimated_duration_minutes,
         required_crews=request.planning_context.required_crews, required_equipment=request.planning_context.required_equipment,
         requires_traffic_block=request.planning_context.requires_traffic_block,
         requires_traction_disconnection=request.planning_context.requires_traction_disconnection,
         co_working_compatible=request.planning_context.co_working_compatible, data_quality_status="COMPLETE",
+        co_working_departments=request.planning_context.co_working_departments,
+        section_latitude=request.planning_context.section_latitude,
+        section_longitude=request.planning_context.section_longitude,
     )
     ingestion_id = str(uuid4())
     with connection() as db:
@@ -869,6 +974,14 @@ def fetch_forecast(latitude: float, longitude: float, proposed_time: datetime) -
         return None
 
 
+def active_policy_number(key: str) -> float:
+    """Read a required numeric COA setting without treating missing data as safe."""
+    value = ACTIVE_COA_POLICY.get(key)
+    if value is None:
+        raise HTTPException(409, f"The active COA policy is missing required setting '{key}'.")
+    return value
+
+
 @app.post("/api/v1/feasibility/assessments", status_code=201)
 def assess_feasibility(request: FeasibilityRequest) -> dict[str, Any]:
     with connection() as db:
@@ -881,46 +994,41 @@ def assess_feasibility(request: FeasibilityRequest) -> dict[str, Any]:
     if row is None:
         raise HTTPException(404, "A complete normalized task with this task ID was not found.")
     task = NormalizedTask.model_validate_json(row["normalized_task_json"])
-    forecast = fetch_forecast(request.section_latitude, request.section_longitude, request.proposed_time)
+    if task.section_latitude is None or task.section_longitude is None:
+        raise HTTPException(409, "This task has no saved section coordinates. Update the F-01 intake record first.")
+    proposed_time = request.proposed_time or task.proposed_block_datetime or task.due_date
+    forecast = fetch_forecast(task.section_latitude, task.section_longitude, proposed_time)
     assessment_id = str(uuid4())
     reasons: list[str] = []
     missing_rules: list[str] = []
-    if task.department is Department.ENGINEERING and request.rules.engineering_max_temperature_c is None:
-        missing_rules.append("engineering maximum temperature")
-    if task.department is Department.TRACTION and request.rules.traction_max_wind_speed_kmh is None:
-        missing_rules.append("traction maximum wind speed")
-    if task.requires_traffic_block and request.rules.traffic_block_min_visibility_m is None:
-        missing_rules.append("traffic-block minimum visibility")
-    if task.requires_traffic_block and request.rules.caution_risk_multiplier is None:
-        missing_rules.append("caution risk multiplier")
     if forecast is None or missing_rules:
         if forecast is None:
-            reasons.append("No forecast is available for the proposed hour and supplied section coordinates.")
+            reasons.append("No forecast is available for the proposed hour and saved section coordinates.")
         if missing_rules:
             reasons.append(f"Missing authority-approved rule values: {', '.join(missing_rules)}.")
-        result = {"assessment_id": assessment_id, "task_id": task.id, "status": "NEEDS_REVIEW", "viable": False, "risk_multiplier": None, "warning_reasons": reasons, "forecast": forecast, "rule_version": request.rules.rule_version, "assessed_at": now().isoformat()}
+        result = {"assessment_id": assessment_id, "task_id": task.id, "status": "NEEDS_REVIEW", "viable": False, "risk_multiplier": None, "warning_reasons": reasons, "forecast": forecast, "rule_version": "ACTIVE_COA_POLICY", "assessed_at": now().isoformat()}
     else:
         status = "SUITABLE"
         risk_multiplier = 1.0
-        if task.department is Department.ENGINEERING and forecast["temperature_c"] > request.rules.engineering_max_temperature_c:
+        if task.department is Department.ENGINEERING and forecast["temperature_c"] > active_policy_number("eng_max_temp"):
             status = "NOT_SUITABLE"
-            reasons.append("Forecast temperature exceeds the supplied Engineering limit.")
-        if task.department is Department.TRACTION and forecast["wind_speed_kmh"] > request.rules.traction_max_wind_speed_kmh:
+            reasons.append("Forecast temperature exceeds the active Engineering limit.")
+        if task.department is Department.TRACTION and forecast["wind_speed_kmh"] > active_policy_number("trac_max_wind"):
             status = "NOT_SUITABLE"
-            reasons.append("Forecast wind speed exceeds the supplied Traction limit.")
-        if task.requires_traffic_block and forecast["visibility_m"] < request.rules.traffic_block_min_visibility_m:
+            reasons.append("Forecast wind speed exceeds the active Traction limit.")
+        if task.requires_traffic_block and forecast["visibility_m"] < active_policy_number("traf_min_visibility"):
             if status != "NOT_SUITABLE":
                 status = "CAUTION_REQUIRED"
-            risk_multiplier = request.rules.caution_risk_multiplier
-            reasons.append("Forecast visibility is below the supplied traffic-block minimum.")
+            risk_multiplier = active_policy_number("caution_risk_multiplier")
+            reasons.append("Forecast visibility is below the active traffic-block minimum.")
         if not reasons:
             reasons.append("Forecast conditions meet all supplied applicable limits.")
-        result = {"assessment_id": assessment_id, "task_id": task.id, "status": status, "viable": status != "NOT_SUITABLE", "risk_multiplier": risk_multiplier, "warning_reasons": reasons, "forecast": forecast, "rule_version": request.rules.rule_version, "assessed_at": now().isoformat()}
+        result = {"assessment_id": assessment_id, "task_id": task.id, "status": status, "viable": status != "NOT_SUITABLE", "risk_multiplier": risk_multiplier, "warning_reasons": reasons, "forecast": forecast, "rule_version": "ACTIVE_COA_POLICY", "assessed_at": now().isoformat()}
     with connection() as db:
         db.execute(
             "INSERT INTO feasibility_assessments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (assessment_id, task.id, request.proposed_time.isoformat(), request.section_latitude, request.section_longitude,
-             request.rules.rule_version, json.dumps(result), now().isoformat()),
+            (assessment_id, task.id, proposed_time.isoformat(), task.section_latitude, task.section_longitude,
+             "ACTIVE_COA_POLICY", json.dumps(result), now().isoformat()),
         )
     return result
 
@@ -929,6 +1037,30 @@ def normalized_factor(value: float, maximum: float) -> float:
     if value > maximum:
         raise ValueError("A supplied measured value exceeds its policy maximum; update the approved policy rather than silently clipping it.")
     return (value / maximum) * 100
+
+
+def operational_priority_context(task: NormalizedTask) -> dict[str, float]:
+    """Derive F-03 traffic inputs from the authoritative F-01/F-07 records."""
+    window_start = task.proposed_block_datetime or task.due_date
+    window_end = window_start + timedelta(minutes=task.estimated_duration_minutes)
+    with connection() as db:
+        timetable_rows = db.execute(
+            """SELECT passenger_trains_affected FROM timetable_occupancy
+               WHERE section_id = ? AND window_start < ? AND window_end > ?""",
+            (task.section_id, window_end.isoformat(), window_start.isoformat()),
+        ).fetchall()
+        goods_rows = db.execute(
+            """SELECT goods_trains_affected FROM goods_forecasts
+               WHERE section_id = ? AND window_start < ? AND window_end > ?""",
+            (task.section_id, window_end.isoformat(), window_start.isoformat()),
+        ).fetchall()
+    passenger = sum(row["passenger_trains_affected"] for row in timetable_rows)
+    goods = sum(row["goods_trains_affected"] for row in goods_rows)
+    return {
+        "passenger_train_frequency_per_day": float(passenger),
+        "goods_train_forecast_per_day": float(goods),
+        "section_traffic_gmt": float(passenger + goods),
+    }
 
 
 @app.get("/api/v1/priority/policies")
@@ -949,13 +1081,83 @@ def register_priority_policy(registration: PriorityPolicyRegistration) -> dict[s
             )
     except sqlite3.IntegrityError as error:
         raise HTTPException(409, "An approved priority policy already exists with this policy_id.") from error
+    ACTIVE_COA_POLICY.update({
+        field: getattr(registration.policy, field)
+        for field in (
+            "passenger_00_06", "passenger_06_12", "passenger_12_18", "passenger_18_24",
+            "goods_00_06", "goods_06_12", "goods_12_18", "goods_18_24",
+        )
+    })
     return {"status": "REGISTERED", **registration.model_dump(mode="json")}
+
+
+@app.get("/api/v1/priority/task-context/{task_id}")
+def get_priority_task_context(task_id: str) -> dict[str, Any]:
+    """Return the active six-hour traffic policy for a selected F-01 task."""
+    with connection() as db:
+        row = db.execute(
+            """SELECT normalized_task_json FROM ingestion_records
+               WHERE source_reference = ? AND data_quality_status = 'COMPLETE'
+               ORDER BY received_at DESC LIMIT 1""",
+            (task_id,),
+        ).fetchone()
+        latest_policy = db.execute(
+            "SELECT policy_json FROM priority_policies ORDER BY approved_at DESC LIMIT 1"
+        ).fetchone()
+        assessment_row = db.execute(
+            """SELECT result_json FROM feasibility_assessments WHERE task_id = ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (task_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "A complete F-01 task with this task ID was not found.")
+    if latest_policy is not None:
+        policy = PriorityPolicy.model_validate_json(latest_policy["policy_json"])
+        ACTIVE_COA_POLICY.update({
+            field: getattr(policy, field)
+            for field in (
+                "passenger_00_06", "passenger_06_12", "passenger_12_18", "passenger_18_24",
+                "goods_00_06", "goods_06_12", "goods_12_18", "goods_18_24",
+            )
+        })
+    task = NormalizedTask.model_validate_json(row["normalized_task_json"])
+    assessment = json.loads(assessment_row["result_json"]) if assessment_row else None
+    hour = task.proposed_block_datetime.astimezone(timezone.utc).hour
+    slot_key, timeframe = (
+        ("00_06", "00:00 - 06:00") if hour < 6 else
+        ("06_12", "06:00 - 12:00") if hour < 12 else
+        ("12_18", "12:00 - 18:00") if hour < 18 else
+        ("18_24", "18:00 - 24:00")
+    )
+    return {
+        "task_id": task.id,
+        "proposed_block_datetime": task.proposed_block_datetime.isoformat(),
+        "slot_key": slot_key,
+        "active_slot": timeframe,
+        "slot_timeframe": timeframe,
+        "passenger_count": active_policy_number(f"passenger_{slot_key}"),
+        "active_passenger_count": active_policy_number(f"passenger_{slot_key}"),
+        "goods_count": active_policy_number(f"goods_{slot_key}"),
+        "active_goods_count": active_policy_number(f"goods_{slot_key}"),
+        "weather_risk": assessment.get("risk_multiplier") if assessment else None,
+        "route_criticality": ACTIVE_COA_POLICY["route_criticality"],
+        "tsr_penalty": ACTIVE_COA_POLICY["tsr_penalty"],
+    }
 
 
 @app.post("/api/v1/priority/evaluations", status_code=201)
 def evaluate_priority(request: PriorityRequest) -> dict[str, Any]:
     policy = request.policy
     policy_id = request.policy_id
+    if policy is None and policy_id is None:
+        with connection() as db:
+            latest_policy = db.execute(
+                "SELECT policy_id, policy_json FROM priority_policies ORDER BY approved_at DESC LIMIT 1"
+            ).fetchone()
+        if latest_policy is None:
+            raise HTTPException(409, "Configure an approved F-07/F-08 policy before running priority evaluation.")
+        policy_id = latest_policy["policy_id"]
+        policy = PriorityPolicy.model_validate_json(latest_policy["policy_json"])
     if policy_id is not None:
         with connection() as db:
             policy_row = db.execute("SELECT policy_json FROM priority_policies WHERE policy_id = ?", (policy_id,)).fetchone()
@@ -981,13 +1183,28 @@ def evaluate_priority(request: PriorityRequest) -> dict[str, Any]:
     assessment = json.loads(assessment_row["result_json"])
     if assessment["status"] not in {"SUITABLE", "CAUTION_REQUIRED"} or assessment["risk_multiplier"] is None:
         raise HTTPException(409, "The latest F-02 assessment is not eligible for priority scoring.")
+    traffic_slots = (
+        ("00_06", 0, 6),
+        ("06_12", 6, 12),
+        ("12_18", 12, 18),
+        ("18_24", 18, 24),
+    )
+    proposed_time = task.proposed_block_datetime or task.due_date
+    slot_name, _, _ = next(slot for slot in traffic_slots if slot[1] <= proposed_time.astimezone(timezone.utc).hour < slot[2])
+    # Prefer overlapping, operator-supplied records; policy slots are a
+    # governed fallback where the operational feed is not yet available.
+    derived_context = operational_priority_context(task)
+    passenger_traffic = derived_context["passenger_train_frequency_per_day"] or getattr(policy, f"passenger_{slot_name}")
+    goods_traffic = derived_context["goods_train_forecast_per_day"] or getattr(policy, f"goods_{slot_name}")
+    section_traffic = derived_context["section_traffic_gmt"] or request.context.section_traffic_gmt
+
     try:
         factors = {
             "safety severity": policy.severity_scores[task.severity],
             "overdue age": normalized_factor(max(0, (now() - task.due_date).total_seconds() / 86400), policy.max_days_overdue),
-            "passenger timetable demand": normalized_factor(request.context.passenger_train_frequency_per_day, policy.max_passenger_trains_per_day),
-            "goods forecast demand": normalized_factor(request.context.goods_train_forecast_per_day, policy.max_goods_trains_per_day),
-            "section traffic": normalized_factor(request.context.section_traffic_gmt, policy.max_section_traffic_gmt),
+            "passenger timetable demand": normalized_factor(passenger_traffic, policy.max_passenger_trains_per_day),
+            "goods forecast demand": normalized_factor(goods_traffic, policy.max_goods_trains_per_day),
+            "section traffic": normalized_factor(section_traffic, policy.max_section_traffic_gmt),
             "active operational restriction": policy.active_restriction_score if request.context.active_operational_restriction else 0,
             "route criticality": request.context.route_criticality_score,
             "F-02 weather risk": normalized_factor(assessment["risk_multiplier"] - 1, policy.max_weather_risk_multiplier - 1),
@@ -1001,10 +1218,14 @@ def evaluate_priority(request: PriorityRequest) -> dict[str, Any]:
         "route criticality": policy.route_criticality_weight, "F-02 weather risk": policy.weather_weight,
     }
     total_weight = sum(weights.values())
-    contributions = [{"factor": name, "input_score": round(factors[name], 2), "weight": weight, "score_contribution": round((factors[name] * weight) / total_weight, 2)} for name, weight in weights.items() if weight > 0]
+    contributions: list[dict[str, Any]] = [
+        {"factor": name, "input_score": round(factors[name], 2), "weight": weight,
+         "score_contribution": round((factors[name] * weight) / total_weight, 2)}
+        for name, weight in weights.items() if weight > 0
+    ]
     score = round(sum(item["score_contribution"] for item in contributions), 2)
     tier = "CRITICAL" if score >= policy.critical_threshold else "HIGH" if score >= policy.high_threshold else "MEDIUM" if score >= policy.medium_threshold else "LOW"
-    result = {"evaluation_id": str(uuid4()), "task_id": task.id, "score": score, "tier": tier, "policy_id": policy_id, "policy_version": policy.policy_version, "f02_assessment_id": assessment["assessment_id"], "top_contributing_factors": sorted(contributions, key=lambda item: item["score_contribution"], reverse=True), "explanation": "Priority is a transparent weighted calculation from the supplied policy and recorded inputs; it is not an ML prediction.", "evaluated_at": now().isoformat()}
+    result = {"evaluation_id": str(uuid4()), "task_id": task.id, "score": score, "tier": tier, "policy_id": policy_id, "policy_version": policy.policy_version, "f02_assessment_id": assessment["assessment_id"], "traffic_slot": slot_name, "passenger_traffic": passenger_traffic, "goods_traffic": goods_traffic, "section_traffic_gmt": section_traffic, "operational_data_source": "INGESTED_RECORDS" if any(derived_context.values()) else "APPROVED_POLICY_FALLBACK", "model": {"type": "RULES_BASELINE", "version": policy.policy_version, "ml_active": False}, "top_contributing_factors": sorted(contributions, key=lambda item: item["score_contribution"], reverse=True), "explanation": "Priority is a transparent weighted calculation using the latest F-01, F-02 and approved cockpit policy inputs. An ML model is not active until validated historical outcomes are available.", "evaluated_at": now().isoformat()}
     with connection() as db:
         db.execute("INSERT INTO priority_evaluations VALUES (?, ?, ?, ?, ?, ?)", (result["evaluation_id"], task.id, policy.policy_version, json.dumps(request.context.model_dump()), json.dumps(result), now().isoformat()))
     return result
@@ -1042,7 +1263,31 @@ def block_plan_eligibility() -> list[dict[str, Any]]:
             missing.append(f"Latest F-02 status is {assessment['status']}; an eligible assessment is required.")
         if priority is None:
             missing.append("Run F-03 priority evaluation.")
-        response.append({"task_id": task.id, "department": task.department, "section_id": task.section_id, "duration_minutes": task.estimated_duration_minutes, "priority_score": priority.get("score") if priority else None, "eligible": not missing, "missing_requirements": missing, "required_coa_start_hour": assessment.get("proposed_time") if assessment and assessment["status"] in {"SUITABLE", "CAUTION_REQUIRED"} else None})
+        task_proposed_dt = (
+            task.proposed_block_datetime.isoformat()
+            if task.proposed_block_datetime
+            else (
+                assessment.get("proposed_time")
+                if assessment and assessment.get("proposed_time")
+                else (task.due_date.isoformat() if task.due_date else None)
+            )
+        )
+        response.append({
+            "task_id": task.id,
+            "department": task.department,
+            "section_id": task.section_id,
+            "duration_minutes": task.estimated_duration_minutes,
+            "estimated_duration": task.estimated_duration_minutes,
+            "estimated_duration_minutes": task.estimated_duration_minutes,
+            "proposed_block_datetime": task_proposed_dt,
+            "priority_score": priority.get("score") if priority else None,
+            "eligible": not missing,
+            "eligibility": "ELIGIBLE" if not missing else "INELIGIBLE",
+            "missing_requirements": missing,
+            "required_coa_start_hour": assessment.get("proposed_time") if assessment and assessment["status"] in {"SUITABLE", "CAUTION_REQUIRED"} else None,
+            "co_working_compatible": task.co_working_compatible,
+            "required_crews": task.required_crews,
+        })
     return sorted(response, key=lambda item: (not item["eligible"], item["task_id"]))
 
 
@@ -1067,6 +1312,14 @@ def create_block_plan(request: BlockPlanRequest) -> dict[str, Any]:
             """SELECT task_id, result_json, proposed_time, created_at FROM feasibility_assessments
                ORDER BY created_at DESC"""
         ).fetchall()
+        # F-01 gatekeeper: collect all source references that have a registered
+        # network reference so tasks without one are deferred up-front.
+        network_ref_rows = db.execute(
+            "SELECT source_system, source_reference FROM network_references"
+        ).fetchall()
+    registered_network_refs: set[tuple[str, str]] = {
+        (row["source_system"], row["source_reference"]) for row in network_ref_rows
+    }
     latest_priorities: dict[str, dict[str, Any]] = {}
     for row in priority_rows:
         latest_priorities.setdefault(row["task_id"], json.loads(row["result_json"]))
@@ -1074,15 +1327,24 @@ def create_block_plan(request: BlockPlanRequest) -> dict[str, Any]:
     for row in assessment_rows:
         latest_assessments.setdefault(row["task_id"], {**json.loads(row["result_json"]), "proposed_time": row["proposed_time"]})
 
+    selected_set = set(request.selected_task_ids) if request.selected_task_ids else None
     eligible: list[dict[str, Any]] = []
     deferred: list[dict[str, str]] = []
     for row in task_rows:
         task = NormalizedTask.model_validate_json(row["normalized_task_json"])
+        if selected_set is not None and task.id not in selected_set:
+            continue
+        # Criterion (a): task must have a registered F-01 network reference.
+        if (task.source_system, task.source_reference) not in registered_network_refs:
+            deferred.append({"task_id": task.id, "reason": "No registered F-01 network reference."})
+            continue
         priority = latest_priorities.get(task.id)
         assessment = latest_assessments.get(task.id)
+        # Criterion (c): task must have a completed F-03 priority score.
         if priority is None:
             deferred.append({"task_id": task.id, "reason": "No F-03 priority evaluation is available."})
             continue
+        # Criterion (b): task must have an eligible "SUITABLE" F-02 feasibility result.
         if assessment is None or assessment.get("status") not in {"SUITABLE", "CAUTION_REQUIRED"}:
             deferred.append({"task_id": task.id, "reason": "No eligible F-02 feasibility assessment is available."})
             continue
@@ -1270,10 +1532,353 @@ def create_integrated_block_plan(request: IntegratedPlanRequest) -> dict[str, An
     result["operational_data_review_reasons"] = review_reasons
     return result
 
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/generate-plan — Simplified F-04 Block Planner endpoint
+# ---------------------------------------------------------------------------
+
+class GeneratePlanWindow(BaseModel):
+    """A single COA time window supplied in the generate-plan request."""
+    corridor_id: str = Field(min_length=1)
+    section_id: str = Field(min_length=1)
+    start_time: datetime
+    end_time: datetime
+    max_simultaneous_crews: int = Field(gt=0)
+    traffic_block_available: bool = True
+    traction_disconnection_available: bool = True
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def gp_window_time_is_aware(cls, value: datetime) -> datetime:
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    @model_validator(mode="after")
+    def gp_window_positive_duration(self) -> "GeneratePlanWindow":
+        if self.end_time <= self.start_time:
+            raise ValueError("COA window must end after it starts.")
+        return self
+
+
+class GeneratePlanRequest(BaseModel):
+    """Payload for POST /generate-plan — available COA windows and optional selected tasks."""
+    coa_windows: list[GeneratePlanWindow] = Field(min_length=1)
+    selected_task_ids: list[str] = Field(default_factory=list)
+
+
+@app.post("/generate-plan", status_code=201)
+@app.post("/api/v1/generate-plan", status_code=201)
+def generate_plan(request: GeneratePlanRequest) -> dict[str, Any]:
+    """F-04 Block Planner: fill COA windows with pending maintenance tasks.
+
+    Three-gate filtering (the Gatekeeper):
+      (a) Task has a registered F-01 network reference.
+      (b) Task has an eligible SUITABLE/CAUTION_REQUIRED F-02 feasibility result.
+      (c) Task has a completed F-03 priority score (0–100).
+
+    When selected_task_ids is provided, only tasks matching those IDs are considered.
+    Tasks are sorted by descending F-03 priority score and assigned to
+    windows respecting capacity, co-working compatibility, and crew limits.
+    """
+
+    # ------------------------------------------------------------------
+    # 1. Data Retrieval
+    # ------------------------------------------------------------------
+    with connection() as db:
+        task_rows = db.execute(
+            """SELECT source_reference, normalized_task_json FROM ingestion_records
+               WHERE data_quality_status = 'COMPLETE'"""
+        ).fetchall()
+        priority_rows = db.execute(
+            """SELECT task_id, result_json FROM priority_evaluations
+               ORDER BY created_at DESC"""
+        ).fetchall()
+        assessment_rows = db.execute(
+            """SELECT task_id, result_json, proposed_time FROM feasibility_assessments
+               ORDER BY created_at DESC"""
+        ).fetchall()
+        network_ref_rows = db.execute(
+            "SELECT source_system, source_reference FROM network_references"
+        ).fetchall()
+
+    registered_network_refs: set[tuple[str, str]] = {
+        (row["source_system"], row["source_reference"]) for row in network_ref_rows
+    }
+    latest_priorities: dict[str, dict[str, Any]] = {}
+    for row in priority_rows:
+        latest_priorities.setdefault(row["task_id"], json.loads(row["result_json"]))
+    latest_assessments: dict[str, dict[str, Any]] = {}
+    for row in assessment_rows:
+        latest_assessments.setdefault(
+            row["task_id"],
+            {**json.loads(row["result_json"]), "proposed_time": row["proposed_time"]},
+        )
+
+    # ------------------------------------------------------------------
+    # 2. Three-Gate Filtering (Gatekeeper) within manual selection
+    # ------------------------------------------------------------------
+    selected_set = set(request.selected_task_ids) if request.selected_task_ids else None
+    eligible: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for row in task_rows:
+        task = NormalizedTask.model_validate_json(row["normalized_task_json"])
+        if selected_set is not None and task.id not in selected_set:
+            continue
+
+        # Gate (a): F-01 network reference must exist.
+        if (task.source_system, task.source_reference) not in registered_network_refs:
+            deferred.append({"task_id": task.id, "reason": "No registered F-01 network reference."})
+            continue
+
+        # Gate (b): F-02 feasibility must be SUITABLE or CAUTION_REQUIRED.
+        assessment = latest_assessments.get(task.id)
+        if assessment is None or assessment.get("status") not in {"SUITABLE", "CAUTION_REQUIRED"}:
+            deferred.append({"task_id": task.id, "reason": "No eligible SUITABLE F-02 feasibility result."})
+            continue
+
+        # Gate (c): F-03 priority score must be present (0–100).
+        priority = latest_priorities.get(task.id)
+        if priority is None or priority.get("score") is None:
+            deferred.append({"task_id": task.id, "reason": "No completed F-03 priority score."})
+            continue
+
+        eligible.append({"task": task, "priority": priority, "assessment": assessment})
+
+    # ------------------------------------------------------------------
+    # 3. Priority Sorting — CRITICAL (90-100), HIGH (70-89), MEDIUM (50-69)
+    # ------------------------------------------------------------------
+    eligible.sort(key=lambda item: (-item["priority"]["score"], item["task"].due_date, item["task"].id))
+
+    # ------------------------------------------------------------------
+    # 4. Window Matching & Capacity / Co-Working Scheduling
+    # ------------------------------------------------------------------
+    windows = sorted(request.coa_windows, key=lambda w: w.start_time)
+
+    # Build per-task list of compatible window indices.
+    candidates: list[dict[str, Any]] = []
+    for item in eligible:
+        task = item["task"]
+        assessment = item["assessment"]
+        assessment_hour = utc_hour(datetime.fromisoformat(assessment["proposed_time"]))
+        choices: list[int] = []
+        match_reasons: list[str] = []
+        for idx, window in enumerate(windows):
+            if window.section_id != task.section_id:
+                continue
+            if utc_hour(window.start_time) != assessment_hour:
+                match_reasons.append("F-02 assessment does not cover this COA window hour.")
+                continue
+            if task.requires_traffic_block and not window.traffic_block_available:
+                match_reasons.append("COA window does not provide the required traffic block.")
+                continue
+            if task.requires_traction_disconnection and not window.traction_disconnection_available:
+                match_reasons.append("COA window does not provide the required traction disconnection.")
+                continue
+            if len(task.required_crews) > window.max_simultaneous_crews:
+                match_reasons.append("Task crew requirement exceeds COA window capacity.")
+                continue
+            window_minutes = (window.end_time - window.start_time).total_seconds() / 60
+            if task.estimated_duration_minutes > window_minutes:
+                match_reasons.append("Task duration exceeds the available COA window.")
+                continue
+            choices.append(idx)
+        if not choices:
+            deferred.append({
+                "task_id": task.id,
+                "reason": "; ".join(sorted(set(match_reasons))) or "No compatible COA window matches the task section.",
+            })
+        else:
+            candidates.append({**item, "choices": choices})
+
+    # Branch-and-bound search with co-working & sequencing rules.
+    remaining_bound = [0.0] * (len(candidates) + 1)
+    for i in range(len(candidates) - 1, -1, -1):
+        remaining_bound[i] = remaining_bound[i + 1] + candidates[i]["priority"]["score"]
+
+    best: dict[str, Any] = {"score": -1.0, "used": float("inf"), "slack": float("inf"), "assignments": []}
+    start_clock = time.monotonic()
+    timed_out = False
+
+    def _gp_consider(assignments: list[dict[str, Any]], score: float, used_minutes: list[float]) -> None:
+        nonlocal best
+        used_count = sum(m > 0 for m in used_minutes)
+        slack = sum(
+            (windows[i].end_time - windows[i].start_time).total_seconds() / 60 - m
+            for i, m in enumerate(used_minutes) if m > 0
+        )
+        if (round(score, 6), -used_count, -slack) > (round(best["score"], 6), -best["used"], -best["slack"]):
+            best = {"score": score, "used": used_count, "slack": slack, "assignments": [dict(a) for a in assignments]}
+
+    def _gp_search(idx: int, assignments: list[dict[str, Any]], score: float, used_minutes: list[float]) -> None:
+        nonlocal timed_out
+        if time.monotonic() - start_clock > 4.0:
+            timed_out = True
+            return
+        if score + remaining_bound[idx] < best["score"]:
+            return
+        if idx == len(candidates):
+            _gp_consider(assignments, score, used_minutes)
+            return
+        item = candidates[idx]
+        task = item["task"]
+        # Skip branch (task unscheduled).
+        _gp_search(idx + 1, assignments, score, used_minutes)
+        for w_idx in item["choices"]:
+            window = windows[w_idx]
+            within_window = [a for a in assignments if a["window_index"] == w_idx]
+
+            # Co-Working Rule: parallelize only when ALL concurrent tasks
+            # have co_working_compatible=True AND crew total ≤ max_simultaneous_crews.
+            can_parallelize = (
+                bool(within_window)
+                and task.co_working_compatible
+                and all(
+                    a["task"].co_working_compatible and a["start_time"] == window.start_time
+                    for a in within_window
+                )
+                and (
+                    sum(len(a["task"].required_crews) for a in within_window)
+                    + len(task.required_crews)
+                    <= window.max_simultaneous_crews
+                )
+            )
+            # If co-working is compatible, schedule in parallel (same start);
+            # otherwise sequence strictly after prior work.
+            task_start = (
+                window.start_time if can_parallelize
+                else window.start_time + timedelta(minutes=used_minutes[w_idx])
+            )
+            task_end = task_start + timedelta(minutes=task.estimated_duration_minutes)
+            if task_end > window.end_time:
+                continue
+
+            # Resource conflict check for overlapping time spans.
+            resource_conflict = any(
+                (
+                    set(task.required_crews).intersection(a["task"].required_crews)
+                    or set(task.required_equipment).intersection(a["task"].required_equipment)
+                )
+                and intervals_overlap(task_start, task_end, a["start_time"], a["end_time"])
+                for a in assignments
+            )
+            if resource_conflict:
+                continue
+
+            assignment = {
+                "task": task, "priority": item["priority"], "assessment": item["assessment"],
+                "window_index": w_idx, "start_time": task_start, "end_time": task_end,
+            }
+            prev = used_minutes[w_idx]
+            used_minutes[w_idx] = max(prev, (task_end - window.start_time).total_seconds() / 60)
+            assignments.append(assignment)
+            _gp_search(idx + 1, assignments, score + item["priority"]["score"], used_minutes)
+            assignments.pop()
+            used_minutes[w_idx] = prev
+
+    _gp_search(0, [], 0.0, [0.0] * len(windows))
+
+    # Collect unscheduled candidates that survived filtering but were not placed.
+    scheduled_ids = {a["task"].id for a in best["assignments"]}
+    for item in candidates:
+        if item["task"].id not in scheduled_ids:
+            deferred.append({
+                "task_id": item["task"].id,
+                "reason": "No remaining compatible COA capacity after optimizing higher-priority work.",
+            })
+
+    # ------------------------------------------------------------------
+    # 5. Build the Proposed Block Plan response
+    # ------------------------------------------------------------------
+    plan_id = str(uuid4())
+    blocks: list[dict[str, Any]] = []
+    for w_idx, window in enumerate(windows):
+        assigned = sorted(
+            (a for a in best["assignments"] if a["window_index"] == w_idx),
+            key=lambda a: a["start_time"],
+        )
+        if not assigned:
+            continue
+        blocks.append({
+            "block_id": str(uuid4()),
+            "corridor_id": window.corridor_id,
+            "section_id": window.section_id,
+            "window_start": window.start_time.isoformat(),
+            "window_end": window.end_time.isoformat(),
+            "max_simultaneous_crews": window.max_simultaneous_crews,
+            "assigned_tasks": [
+                {
+                    "task_id": a["task"].id,
+                    "department": a["task"].department,
+                    "severity": a["task"].severity,
+                    "priority_score": a["priority"]["score"],
+                    "priority_tier": a["priority"].get("tier", ""),
+                    "co_working_compatible": a["task"].co_working_compatible,
+                    "estimated_duration_minutes": a["task"].estimated_duration_minutes,
+                    "scheduled_start": a["start_time"].isoformat(),
+                    "scheduled_end": a["end_time"].isoformat(),
+                    "scheduling_mode": "PARALLEL" if a["start_time"] == window.start_time and len(assigned) > 1 and a["task"].co_working_compatible else "SEQUENTIAL",
+                    "required_crews": a["task"].required_crews,
+                    "requires_traffic_block": a["task"].requires_traffic_block,
+                    "requires_traction_disconnection": a["task"].requires_traction_disconnection,
+                }
+                for a in assigned
+            ],
+            "consolidated_departments": sorted({a["task"].department for a in assigned}),
+            "used_minutes": round(max((a["end_time"] - window.start_time).total_seconds() / 60 for a in assigned), 2),
+            "total_maintenance_minutes": sum(a["task"].estimated_duration_minutes for a in assigned),
+            "available_minutes": round((window.end_time - window.start_time).total_seconds() / 60, 2),
+        })
+
+    total_block_hours_used = round(sum(b["used_minutes"] for b in blocks) / 60, 2)
+    unscheduled_count = len(deferred)
+
+    result = {
+        "plan_id": plan_id,
+        "status": "PROPOSED",
+        "proposed_block_plan": blocks,
+        "BLOCK_HOURS_USED": total_block_hours_used,
+        "UNSCHEDULED_TASKS": unscheduled_count,
+        "unscheduled_task_details": deferred,
+        "metrics": {
+            "scheduled_task_count": len(scheduled_ids),
+            "unscheduled_task_count": unscheduled_count,
+            "total_priority_score_scheduled": round(best["score"], 2),
+            "total_block_hours_used": total_block_hours_used,
+            "distinct_windows_used": len(blocks),
+            "shared_block_count": sum(1 for b in blocks if len(b["assigned_tasks"]) > 1),
+            "parallel_hours_saved": round(
+                sum(max(0, b["total_maintenance_minutes"] - b["used_minutes"]) for b in blocks) / 60, 2
+            ),
+            "search_timed_out": timed_out,
+        },
+        "notes": [
+            "Tasks run in parallel only when every concurrent task explicitly permits co-working, "
+            "no crew or equipment resource conflicts exist, and COA crew capacity covers all crews; "
+            "otherwise they are sequenced strictly one after the other.",
+            "Proposed only: controller sanction remains required.",
+        ],
+        "generated_at": now().isoformat(),
+    }
+
+    # Persist the plan for audit trail.
+    with connection() as db:
+        db.execute(
+            "INSERT INTO block_plans VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                plan_id,
+                "GENERATED",
+                (min(w.start_time for w in windows)).isoformat(),
+                (max(w.end_time for w in windows)).isoformat(),
+                json.dumps([w.model_dump(mode="json") for w in windows]),
+                json.dumps(result, default=str),
+                now().isoformat(),
+            ),
+        )
+    return result
+
+
 # --- F-05 Interactive "What-If" Delay Simulator ---
 
 import networkx as nx
-from datetime import timedelta
 import time as perf_time
 
 class TrainType(StrEnum):
@@ -1412,10 +2017,10 @@ class CorridorWhatIfSimulator:
         for schedule in self.schedules:
             stops = schedule.station_stops
             for i in range(len(stops) - 1):
-                s1 = stops[i]["station_code"] if isinstance(stops[i], dict) else stops[i].station_code
-                s2 = stops[i+1]["station_code"] if isinstance(stops[i+1], dict) else stops[i+1].station_code
-                dep_time = _parse_iso_dt(stops[i]["scheduled_departure"] if isinstance(stops[i], dict) else stops[i].scheduled_departure)
-                arr_time = _parse_iso_dt(stops[i+1]["scheduled_arrival"] if isinstance(stops[i+1], dict) else stops[i+1].scheduled_arrival)
+                s1 = str(stops[i]["station_code"])
+                s2 = str(stops[i + 1]["station_code"])
+                dep_time = _parse_iso_dt(stops[i]["scheduled_departure"])
+                arr_time = _parse_iso_dt(stops[i + 1]["scheduled_arrival"])
                 if self._matches_section(s1, s2, section_from, section_to):
                     if not (arr_time <= start_time or dep_time >= end_time):
                         affected.append((schedule.train_no, s1))
@@ -1727,7 +2332,7 @@ class MockRedisPubSub:
             await q.put(message)
             
     async def subscribe(self, channel: str):
-        q = asyncio.Queue()
+        q: asyncio.Queue[str] = asyncio.Queue()
         if channel not in self.channels:
             self.channels[channel] = set()
         self.channels[channel].add(q)

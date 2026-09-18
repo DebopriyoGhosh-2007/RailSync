@@ -1,15 +1,15 @@
 import React, { useState, useMemo } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { useAuth } from '@/auth/AuthContext';
 import { cockpitApi } from '@/api/cockpit';
-import { getBlockStatusConfig, BlockStatus, isActionAllowed, BLOCK_ACTIONS, REASON_CODES } from '@/domain/block-state';
+import { getBlockStatusConfig, BLOCK_ACTIONS, REASON_CODES } from '@/domain/block-state';
 import { Skeleton } from '@/components/ui/skeleton';
-import { AlertCircle, RefreshCw, Activity, Search } from 'lucide-react';
+import { AlertCircle, RefreshCw, Search } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { PolicyEditor } from './PolicyEditor';
 
 export default function CockpitPage() {
   const { profile } = useAuth();
-  const queryClient = useQueryClient();
   
   // Filters
   const [sectionFilter, setSectionFilter] = useState('ALL');
@@ -29,7 +29,6 @@ export default function CockpitPage() {
   const {
     kpis,
     blocks = [],
-    unscheduled_tasks = [],
     deferred_tasks = []
   } = summary || {};
 
@@ -129,6 +128,8 @@ export default function CockpitPage() {
           <div id="kpiDeferredCount" className="text-lg font-bold text-red-700">{isLoading ? <Skeleton className="h-6 w-12" /> : deferred_tasks.length}</div>
         </div>
       </div>
+
+      <PolicyEditor />
 
       {/* Main Board */}
       <div className="flex-1 flex gap-4 min-h-0">

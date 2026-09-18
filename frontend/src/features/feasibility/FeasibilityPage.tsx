@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { intakeApi } from '@/api/intake';
 import { feasibilityApi } from '@/api/feasibility';
@@ -6,6 +7,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, ShieldAlert, CheckCircle, HelpCircle, TriangleAlert } from 'lucide-react';
 
 export default function FeasibilityPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const { data: tasks, isLoading: tasksLoading } = useQuery({
     queryKey: ['ingestion-tasks'],
     queryFn: intakeApi.getTasks,
@@ -13,14 +16,7 @@ export default function FeasibilityPage() {
 
   const [formData, setFormData] = useState({
     task_id: '',
-    section_latitude: '',
-    section_longitude: '',
-    proposed_time: '',
-    rule_version: '',
-    engineering_max_temperature_c: '',
-    traction_max_wind_speed_kmh: '',
-    traffic_block_min_visibility_m: '',
-    caution_risk_multiplier: ''
+    proposed_time: ''
   });
 
   const mutation = useMutation({
@@ -33,22 +29,20 @@ export default function FeasibilityPage() {
     
     const payload = {
       task_id: formData.task_id,
-      section_latitude: Number(formData.section_latitude),
-      section_longitude: Number(formData.section_longitude),
-      proposed_time: formData.proposed_time,
-      rules: {
-        version: formData.rule_version,
-        engineering_max_temperature_c: formData.engineering_max_temperature_c ? Number(formData.engineering_max_temperature_c) : undefined,
-        traction_max_wind_speed_kmh: formData.traction_max_wind_speed_kmh ? Number(formData.traction_max_wind_speed_kmh) : undefined,
-        traffic_block_min_visibility_m: formData.traffic_block_min_visibility_m ? Number(formData.traffic_block_min_visibility_m) : undefined,
-        caution_risk_multiplier: formData.caution_risk_multiplier ? Number(formData.caution_risk_multiplier) : undefined,
-      }
+      proposed_time: formData.proposed_time
     };
     
     mutation.mutate(payload);
   };
 
-  const completeTasks = tasks?.filter((t: any) => t.status === 'COMPLETE') || [];
+  const completeTasks = tasks?.filter((t: any) => t.data_quality_status === 'COMPLETE' && t.normalized_task) || [];
+
+  useEffect(() => {
+    const taskId = (location.state as { taskId?: string } | null)?.taskId;
+    if (!taskId || !completeTasks.length) return;
+    const selected = completeTasks.find((task: any) => task.normalized_task.id === taskId)?.normalized_task;
+    if (selected) setFormData({ task_id: selected.id, proposed_time: selected.proposed_block_datetime || selected.due_date || '' });
+  }, [location.state, tasks]);
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -77,59 +71,28 @@ export default function FeasibilityPage() {
                   required
                   className="w-full border-slate-300 rounded text-sm p-2 border"
                   value={formData.task_id}
-                  onChange={e => setFormData(p => ({ ...p, task_id: e.target.value }))}
+                  onChange={e => {
+                    const selected = completeTasks.find((task: any) => task.normalized_task.id === e.target.value)?.normalized_task;
+                    setFormData({
+                      task_id: e.target.value,
+                      proposed_time: selected?.proposed_block_datetime || selected?.due_date || ''
+                    });
+                  }}
                 >
                   <option value="">-- Select a complete task --</option>
                   {completeTasks.map((t: any) => (
-                    <option key={t.task_id} value={t.task_id}>
-                      {t.task_id} - {t.normalized_data?.section || t.department}
+                    <option key={t.normalized_task.id} value={t.normalized_task.id}>
+                      {t.normalized_task.id} - {t.normalized_task.section_id || t.normalized_task.department}
                     </option>
                   ))}
                 </select>
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-sm font-semibold text-slate-700">Section Latitude</label>
-                <input required type="number" step="any" min="-90" max="90" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.section_latitude} onChange={e => setFormData(p => ({ ...p, section_latitude: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-semibold text-slate-700">Section Longitude</label>
-                <input required type="number" step="any" min="-180" max="180" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.section_longitude} onChange={e => setFormData(p => ({ ...p, section_longitude: e.target.value }))} />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-sm font-semibold text-slate-700">Proposed Block Time</label>
-                <input required type="datetime-local" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.proposed_time} onChange={e => setFormData(p => ({ ...p, proposed_time: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-sm font-semibold text-slate-700">Rule / Circular Version</label>
-                <input required type="text" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.rule_version} onChange={e => setFormData(p => ({ ...p, rule_version: e.target.value }))} />
-              </div>
-            </div>
-
-            <h3 className="text-sm font-bold border-b pb-2 pt-4">Operational Rule Thresholds (Optional)</h3>
-            
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-700">Eng Max Temp (°C)</label>
-                <input type="number" step="any" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.engineering_max_temperature_c} onChange={e => setFormData(p => ({ ...p, engineering_max_temperature_c: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-700">Trac Max Wind (km/h)</label>
-                <input type="number" step="any" min="0" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.traction_max_wind_speed_kmh} onChange={e => setFormData(p => ({ ...p, traction_max_wind_speed_kmh: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-700">Traf Min Visibility (m)</label>
-                <input type="number" step="any" min="0" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.traffic_block_min_visibility_m} onChange={e => setFormData(p => ({ ...p, traffic_block_min_visibility_m: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-700">Caution Risk Multiplier (1-2)</label>
-                <input type="number" step="any" min="1" max="2" className="w-full border-slate-300 rounded text-sm p-2 border" value={formData.caution_risk_multiplier} onChange={e => setFormData(p => ({ ...p, caution_risk_multiplier: e.target.value }))} />
-              </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-semibold text-slate-700">Proposed Block Time</label>
+              <input required type="datetime-local" readOnly className="w-full border-slate-300 rounded text-sm p-2 border bg-slate-50" value={formData.proposed_time ? formData.proposed_time.slice(0, 16) : ''} />
+              <p className="text-xs text-slate-500">Automatically loaded from the selected F-01 task.</p>
             </div>
 
             <div className="pt-4">
@@ -138,7 +101,7 @@ export default function FeasibilityPage() {
                 disabled={mutation.isPending || completeTasks.length === 0}
                 className="w-full py-2 bg-primary text-white rounded font-medium hover:bg-primary/90 disabled:opacity-50 text-sm"
               >
-                {mutation.isPending ? 'Assessing...' : 'Run Assessment'}
+                {mutation.isPending ? 'Assessing...' : 'Assess candidate window'}
               </button>
             </div>
           </form>
@@ -199,11 +162,11 @@ export default function FeasibilityPage() {
 
                 <div className="bg-white border rounded p-4 text-sm font-mono space-y-2">
                   <div className="text-xs text-slate-500 uppercase font-sans font-bold border-b pb-2 mb-2">Conditions</div>
-                  {mutation.data.forecast_timestamp && <div>Forecast Time: {mutation.data.forecast_timestamp}</div>}
-                  {mutation.data.rule_version && <div>Rule Version: {mutation.data.rule_version}</div>}
-                  {mutation.data.temperature_c !== undefined && <div>Temperature: {mutation.data.temperature_c} °C</div>}
-                  {mutation.data.wind_speed_kmh !== undefined && <div>Wind: {mutation.data.wind_speed_kmh} km/h</div>}
-                  {mutation.data.visibility_m !== undefined && <div>Visibility: {mutation.data.visibility_m} m</div>}
+                  {mutation.data.forecast?.forecast_timestamp && <div>Forecast Time: {mutation.data.forecast.forecast_timestamp}</div>}
+                  {mutation.data.rule_version && <div>Rule Source: {mutation.data.rule_version}</div>}
+                  {mutation.data.forecast?.temperature_c !== undefined && <div>Temperature: {mutation.data.forecast.temperature_c} °C</div>}
+                  {mutation.data.forecast?.wind_speed_kmh !== undefined && <div>Wind: {mutation.data.forecast.wind_speed_kmh} km/h</div>}
+                  {mutation.data.forecast?.visibility_m !== undefined && <div>Visibility: {mutation.data.forecast.visibility_m} m</div>}
                   {mutation.data.risk_multiplier !== undefined && <div>Risk Multiplier: {mutation.data.risk_multiplier}</div>}
                   
                   {mutation.data.warning_reasons?.length > 0 && (
@@ -215,6 +178,11 @@ export default function FeasibilityPage() {
                     </div>
                   )}
                 </div>
+                {(mutation.data.status === 'SUITABLE' || mutation.data.status === 'CAUTION_REQUIRED') && (
+                  <button onClick={() => navigate('/priority', { state: { taskId: mutation.data.task_id } })} className="w-full py-2 bg-primary text-white rounded font-medium hover:bg-primary/90 text-sm">
+                    Continue to priority
+                  </button>
+                )}
               </div>
             )}
           </div>
