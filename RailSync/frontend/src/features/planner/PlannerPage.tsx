@@ -10,6 +10,18 @@ export default function PlannerPage() {
     queryFn: plannerApi.getEligibility,
   });
 
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+
+  // Default to selecting all eligible tickets when eligibility data loads
+  React.useEffect(() => {
+    if (eligibility) {
+      const eligibleIds = eligibility
+        .filter((t: any) => t.eligibility === 'ELIGIBLE' || t.eligible)
+        .map((t: any) => t.task_id);
+      setSelectedTaskIds(eligibleIds);
+    }
+  }, [eligibility]);
+
   const [formData, setFormData] = useState({
     horizon: 'WEEKLY',
     horizon_start: '',
@@ -20,6 +32,23 @@ export default function PlannerPage() {
   const mutation = useMutation({
     mutationFn: plannerApi.plan
   });
+
+  const eligibleTasks = eligibility?.filter((t: any) => t.eligibility === 'ELIGIBLE' || t.eligible) || [];
+  const allEligibleSelected = eligibleTasks.length > 0 && eligibleTasks.every((t: any) => selectedTaskIds.includes(t.task_id));
+
+  const handleToggleTask = (taskId: string) => {
+    setSelectedTaskIds(prev =>
+      prev.includes(taskId) ? prev.filter(id => id !== taskId) : [...prev, taskId]
+    );
+  };
+
+  const handleToggleAll = () => {
+    if (allEligibleSelected) {
+      setSelectedTaskIds([]);
+    } else {
+      setSelectedTaskIds(eligibleTasks.map((t: any) => t.task_id));
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,11 +61,17 @@ export default function PlannerPage() {
       return;
     }
 
+    if (eligibleTasks.length > 0 && selectedTaskIds.length === 0) {
+      alert("Please select at least one eligible ticket from the eligibility pool.");
+      return;
+    }
+
     mutation.mutate({
       horizon: formData.horizon,
       horizon_start: formData.horizon_start,
       horizon_end: formData.horizon_end,
-      coa_windows: parsedCoa
+      coa_windows: parsedCoa,
+      selected_task_ids: selectedTaskIds
     });
   };
 
@@ -51,8 +86,22 @@ export default function PlannerPage() {
 
       <div className="grid grid-cols-4 gap-6">
         <div className="col-span-1 bg-white border border-slate-200 rounded-lg shadow-sm flex flex-col h-[700px]">
-          <div className="p-4 border-b border-slate-100 shrink-0">
-            <h2 className="font-bold text-slate-900 text-sm">Eligibility Pool</h2>
+          <div className="p-4 border-b border-slate-100 shrink-0 flex justify-between items-center">
+            <div>
+              <h2 className="font-bold text-slate-900 text-sm">Eligibility Pool</h2>
+              <span className="text-[11px] text-slate-500">
+                {selectedTaskIds.length} of {eligibleTasks.length} selected
+              </span>
+            </div>
+            {eligibleTasks.length > 0 && (
+              <button
+                type="button"
+                onClick={handleToggleAll}
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800"
+              >
+                {allEligibleSelected ? 'Deselect all' : 'Select all'}
+              </button>
+            )}
           </div>
           <div className="flex-1 overflow-auto p-4 bg-slate-50">
             {eligibilityLoading ? (
@@ -64,23 +113,46 @@ export default function PlannerPage() {
               <div className="text-sm text-slate-500 text-center mt-10">No eligible tasks.</div>
             ) : (
               <div id="candidate-body" className="space-y-3">
-                {eligibility?.map((t: any) => (
-                  <div key={t.task_id} className="bg-white border border-slate-200 p-3 rounded shadow-sm text-sm">
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="font-mono font-bold text-xs">{t.task_id}</span>
-                      <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${t.eligibility === 'ELIGIBLE' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
-                        {t.eligibility}
-                      </span>
-                    </div>
-                    <div className="text-xs text-slate-500 mb-1">{t.department} - {t.section}</div>
-                    {t.priority_score && <div className="text-xs font-semibold text-indigo-700">Priority: {t.priority_score}</div>}
-                    {t.missing_requirements?.length > 0 && (
-                      <div className="text-[10px] text-red-600 mt-1 bg-red-50 p-1 rounded">
-                        Missing: {t.missing_requirements.join(', ')}
+                {eligibility?.map((t: any) => {
+                  const isEligible = t.eligibility === 'ELIGIBLE' || t.eligible;
+                  const isSelected = selectedTaskIds.includes(t.task_id);
+                  return (
+                    <div
+                      key={t.task_id}
+                      onClick={() => isEligible && handleToggleTask(t.task_id)}
+                      className={`border p-3 rounded shadow-sm text-sm transition-colors ${
+                        isEligible
+                          ? isSelected ? 'bg-indigo-50/50 border-indigo-300 cursor-pointer' : 'bg-white border-slate-200 cursor-pointer hover:bg-slate-50'
+                          : 'bg-slate-50 border-slate-200 opacity-75'
+                      }`}
+                    >
+                      <div className="flex justify-between items-center mb-1">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={isEligible ? isSelected : false}
+                            disabled={!isEligible}
+                            onChange={() => isEligible && handleToggleTask(t.task_id)}
+                            onClick={e => e.stopPropagation()}
+                            className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                            title={isEligible ? `Include ${t.task_id}` : 'Ineligible: complete F-02 and F-03 first'}
+                          />
+                          <span className="font-mono font-bold text-xs">{t.task_id}</span>
+                        </div>
+                        <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${isEligible ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
+                          {isEligible ? 'ELIGIBLE' : 'NOT READY'}
+                        </span>
                       </div>
-                    )}
-                  </div>
-                ))}
+                      <div className="text-xs text-slate-500 mb-1 ml-6">{t.department} - {t.section_id || t.section}</div>
+                      {t.priority_score && <div className="text-xs font-semibold text-indigo-700 ml-6">Priority: {t.priority_score}</div>}
+                      {t.missing_requirements?.length > 0 && (
+                        <div className="text-[10px] text-red-600 mt-1 bg-red-50 p-1 rounded ml-6">
+                          Missing: {t.missing_requirements.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

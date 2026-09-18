@@ -292,7 +292,7 @@ class BlockPlanRequest(BaseModel):
     horizon_start: datetime
     horizon_end: datetime
     coa_windows: list[CorridorWindow] = Field(min_length=1)
-    selected_task_ids: list[str] = Field(default_factory=list)
+    selected_task_ids: list[str] | None = None
 
     @field_validator("horizon_start", "horizon_end")
     @classmethod
@@ -1327,7 +1327,7 @@ def create_block_plan(request: BlockPlanRequest) -> dict[str, Any]:
     for row in assessment_rows:
         latest_assessments.setdefault(row["task_id"], {**json.loads(row["result_json"]), "proposed_time": row["proposed_time"]})
 
-    selected_set = set(request.selected_task_ids) if request.selected_task_ids else None
+    selected_set = set(request.selected_task_ids) if request.selected_task_ids is not None else None
     eligible: list[dict[str, Any]] = []
     deferred: list[dict[str, str]] = []
     for row in task_rows:
@@ -1467,7 +1467,13 @@ def create_block_plan(request: BlockPlanRequest) -> dict[str, Any]:
             "total_maintenance_minutes": sum(item["task"].estimated_duration_minutes for item in assigned),
             "available_minutes": (window.end_time - window.start_time).total_seconds() / 60,
         })
-    result = {"plan_id": plan_id, "status": "PROPOSED", "horizon": request.horizon, "horizon_start": request.horizon_start, "horizon_end": request.horizon_end, "scheduled_blocks": blocks, "unscheduled_tasks": deferred, "metrics": {"scheduled_task_count": len(scheduled_ids), "unscheduled_task_count": len(deferred), "total_priority_score_scheduled": round(best["score"], 2), "distinct_corridor_disruptions": len(blocks), "shared_block_count": sum(1 for block in blocks if len(block["assigned_tasks"]) > 1), "total_block_hours_used": round(sum(block["used_minutes"] for block in blocks) / 60, 2), "parallel_block_hours_saved": round(sum(max(0, block["total_maintenance_minutes"] - block["used_minutes"]) for block in blocks) / 60, 2), "passenger_trains_affected": sum(block["passenger_trains_affected"] for block in blocks), "goods_trains_affected": sum(block["goods_trains_affected"] for block in blocks), "search_timed_out": timed_out}, "notes": ["Tasks run in parallel only when every concurrent task explicitly permits co-working, no crew or equipment resource conflicts exist, and COA capacity covers all crews; otherwise they are sequenced.", "Proposed only: controller sanction remains required."]}
+    plan_notes = [
+        "Tasks run in parallel only when every concurrent task explicitly permits co-working, no crew or equipment resource conflicts exist, and COA capacity covers all crews; otherwise they are sequenced.",
+        "Proposed only: controller sanction remains required."
+    ]
+    if selected_set is not None:
+        plan_notes.append(f"Optimized using {len(selected_set)} manually selected ticket(s).")
+    result = {"plan_id": plan_id, "status": "PROPOSED", "horizon": request.horizon, "horizon_start": request.horizon_start, "horizon_end": request.horizon_end, "scheduled_blocks": blocks, "unscheduled_tasks": deferred, "metrics": {"scheduled_task_count": len(scheduled_ids), "unscheduled_task_count": len(deferred), "total_priority_score_scheduled": round(best["score"], 2), "distinct_corridor_disruptions": len(blocks), "shared_block_count": sum(1 for block in blocks if len(block["assigned_tasks"]) > 1), "total_block_hours_used": round(sum(block["used_minutes"] for block in blocks) / 60, 2), "parallel_block_hours_saved": round(sum(max(0, block["total_maintenance_minutes"] - block["used_minutes"]) for block in blocks) / 60, 2), "passenger_trains_affected": sum(block["passenger_trains_affected"] for block in blocks), "goods_trains_affected": sum(block["goods_trains_affected"] for block in blocks), "search_timed_out": timed_out}, "notes": plan_notes}
     with connection() as db:
         db.execute("INSERT INTO block_plans VALUES (?, ?, ?, ?, ?, ?, ?)", (plan_id, request.horizon, request.horizon_start.isoformat(), request.horizon_end.isoformat(), json.dumps([window.model_dump(mode="json") for window in windows]), json.dumps(result, default=str), now().isoformat()))
         for block in blocks:
